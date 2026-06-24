@@ -81,7 +81,7 @@ class Calculation:
             raise OperationError(f"Calculation failed: {str(e)}")
 
     @staticmethod
-    def _raise_div_zero():  # pragma: no cover
+    def _raise_div_zero():
         """
         Helper method to raise division by zero error.
 
@@ -90,7 +90,7 @@ class Calculation:
         raise OperationError("Division by zero is not allowed")
 
     @staticmethod
-    def _raise_neg_power():  # pragma: no cover
+    def _raise_neg_power():
         """
         Helper method to raise negative power error.
 
@@ -99,7 +99,7 @@ class Calculation:
         raise OperationError("Negative exponents are not supported")
 
     @staticmethod
-    def _raise_invalid_root(x: Decimal, y: Decimal):  # pragma: no cover
+    def _raise_invalid_root(x: Decimal, y: Decimal):
         """
         Helper method to raise invalid root error.
 
@@ -114,7 +114,7 @@ class Calculation:
             raise OperationError("Zero root is undefined")
         if x < 0:
             raise OperationError("Cannot calculate root of negative number")
-        raise OperationError("Invalid root operation")
+        raise OperationError("Invalid root operation")  # pragma: no cover
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -168,7 +168,7 @@ class Calculation:
                 logging.warning(
                     f"Loaded calculation result {saved_result} "
                     f"differs from computed result {calc.result}"
-                )  # pragma: no cover
+                )
 
             return calc
 
@@ -245,5 +245,5 @@ class Calculation:
             return str(self.result.normalize().quantize(
                 Decimal('0.' + '0' * precision)
             ).normalize())
-        except InvalidOperation:  # pragma: no cover
+        except InvalidOperation:
             return str(self.result)
