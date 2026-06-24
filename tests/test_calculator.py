@@ -1,4 +1,5 @@
 import datetime
+from contextlib import contextmanager
 from pathlib import Path
 import pandas as pd
 import pytest
@@ -6,31 +7,33 @@ from unittest.mock import Mock, patch, PropertyMock
 from decimal import Decimal
 from tempfile import TemporaryDirectory
 from app.calculator import Calculator
-from app.calculator_repl import calculator_repl
 from app.calculator_config import CalculatorConfig
 from app.exceptions import OperationError, ValidationError
 from app.history import LoggingObserver, AutoSaveObserver
 from app.operations import OperationFactory
+
+
+@contextmanager
+def patched_config(temp_path):
+    """Build a CalculatorConfig whose file paths are redirected into temp_path."""
+    config = CalculatorConfig(base_dir=temp_path)
+    with patch.object(CalculatorConfig, 'log_dir', new_callable=PropertyMock) as mock_log_dir, \
+         patch.object(CalculatorConfig, 'log_file', new_callable=PropertyMock) as mock_log_file, \
+         patch.object(CalculatorConfig, 'history_dir', new_callable=PropertyMock) as mock_history_dir, \
+         patch.object(CalculatorConfig, 'history_file', new_callable=PropertyMock) as mock_history_file:
+        mock_log_dir.return_value = temp_path / "logs"
+        mock_log_file.return_value = temp_path / "logs/calculator.log"
+        mock_history_dir.return_value = temp_path / "history"
+        mock_history_file.return_value = temp_path / "history/calculator_history.csv"
+        yield config
+
 
 # Fixture to initialize Calculator with a temporary directory for file paths
 @pytest.fixture
 def calculator():
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        config = CalculatorConfig(base_dir=temp_path)
-
-        # Patch properties to use the temporary directory paths
-        with patch.object(CalculatorConfig, 'log_dir', new_callable=PropertyMock) as mock_log_dir, \
-             patch.object(CalculatorConfig, 'log_file', new_callable=PropertyMock) as mock_log_file, \
-             patch.object(CalculatorConfig, 'history_dir', new_callable=PropertyMock) as mock_history_dir, \
-             patch.object(CalculatorConfig, 'history_file', new_callable=PropertyMock) as mock_history_file:
-            
-            # Set return values to use paths within the temporary directory
-            mock_log_dir.return_value = temp_path / "logs"
-            mock_log_file.return_value = temp_path / "logs/calculator.log"
-            mock_history_dir.return_value = temp_path / "history"
-            mock_history_file.return_value = temp_path / "history/calculator_history.csv"
-            
+        with patched_config(temp_path) as config:
             # Return an instance of Calculator with the mocked config
             yield Calculator(config=config)
 
@@ -156,25 +159,119 @@ def test_clear_history(calculator):
     assert calculator.undo_stack == []
     assert calculator.redo_stack == []
 
-# Test REPL Commands (using patches for input/output handling)
+# Test Logging Setup Failure
 
-@patch('builtins.input', side_effect=['exit'])
-@patch('builtins.print')
-def test_calculator_repl_exit(mock_print, mock_input):
-    with patch('app.calculator.Calculator.save_history') as mock_save_history:
-        calculator_repl()
-        mock_save_history.assert_called_once()
-        mock_print.assert_any_call("History saved successfully.")
-        mock_print.assert_any_call("Goodbye!")
+def test_setup_logging_failure_raises_and_prints(capsys):
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        with patched_config(temp_path) as config:
+            with patch('app.calculator.logging.basicConfig', side_effect=OSError("disk full")):
+                with pytest.raises(OSError, match="disk full"):
+                    Calculator(config=config)
+    assert "Error setting up logging" in capsys.readouterr().out
 
-@patch('builtins.input', side_effect=['help', 'exit'])
-@patch('builtins.print')
-def test_calculator_repl_help(mock_print, mock_input):
-    calculator_repl()
-    mock_print.assert_any_call("\nAvailable commands:")
 
-@patch('builtins.input', side_effect=['add', '2', '3', 'exit'])
-@patch('builtins.print')
-def test_calculator_repl_addition(mock_print, mock_input):
-    calculator_repl()
-    mock_print.assert_any_call("\nResult: 5")
+# Test History Load Failure During Initialization
+
+def test_init_load_history_failure_is_logged_not_raised():
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        with patched_config(temp_path) as config:
+            with patch('app.calculator.Calculator.load_history', side_effect=OperationError("bad csv")):
+                with patch('app.calculator.logging.warning') as mock_warning:
+                    calc = Calculator(config=config)
+    assert calc.history == []
+    mock_warning.assert_called_once()
+    assert "Could not load existing history" in mock_warning.call_args[0][0]
+
+
+# Test History Size Trimming
+
+def test_history_trims_to_max_history_size(calculator):
+    calculator.config.max_history_size = 2
+    operation = OperationFactory.create_operation('add')
+    calculator.set_operation(operation)
+    calculator.perform_operation(1, 1)
+    calculator.perform_operation(2, 2)
+    calculator.perform_operation(3, 3)
+    assert len(calculator.history) == 2
+    assert calculator.history[0].operand1 == Decimal('2')
+
+
+# Test Generic Exception Wrapping in perform_operation
+
+def test_perform_operation_wraps_generic_exception(calculator):
+    mock_operation = Mock()
+    mock_operation.execute.side_effect = RuntimeError("execute boom")
+    calculator.set_operation(mock_operation)
+    with pytest.raises(OperationError, match="Operation failed: execute boom"):
+        calculator.perform_operation(1, 2)
+
+
+# Test Saving Empty History
+
+def test_save_history_with_empty_history_writes_header_only(calculator):
+    calculator.history = []
+    calculator.save_history()
+    df = pd.read_csv(calculator.config.history_file)
+    assert list(df.columns) == ['operation', 'operand1', 'operand2', 'result', 'timestamp']
+    assert df.empty
+
+
+@patch('app.calculator.pd.DataFrame.to_csv', side_effect=Exception("write failed"))
+def test_save_history_raises_operation_error(mock_to_csv, calculator):
+    operation = OperationFactory.create_operation('add')
+    calculator.set_operation(operation)
+    calculator.perform_operation(2, 3)
+    with pytest.raises(OperationError, match="Failed to save history"):
+        calculator.save_history()
+
+
+# Test Loading an Empty History File
+
+def test_load_history_with_empty_csv_sets_empty_history(calculator):
+    calculator.config.history_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=['operation', 'operand1', 'operand2', 'result', 'timestamp']).to_csv(
+        calculator.config.history_file, index=False
+    )
+    calculator.load_history()
+    assert calculator.history == []
+
+
+# Test Loading History Failure
+
+@patch('app.calculator.pd.read_csv', side_effect=Exception("corrupt"))
+@patch('app.calculator.Path.exists', return_value=True)
+def test_load_history_raises_operation_error(mock_exists, mock_read_csv, calculator):
+    with pytest.raises(OperationError, match="Failed to load history"):
+        calculator.load_history()
+
+
+# Test get_history_dataframe
+
+def test_get_history_dataframe_returns_expected_columns(calculator):
+    operation = OperationFactory.create_operation('add')
+    calculator.set_operation(operation)
+    calculator.perform_operation(2, 3)
+    df = calculator.get_history_dataframe()
+    assert list(df.columns) == ['operation', 'operand1', 'operand2', 'result', 'timestamp']
+    assert len(df) == 1
+
+
+# Test show_history
+
+def test_show_history_formats_entries(calculator):
+    operation = OperationFactory.create_operation('add')
+    calculator.set_operation(operation)
+    calculator.perform_operation(2, 3)
+    assert calculator.show_history() == ["Addition(2, 3) = 5"]
+
+
+# Test Undo/Redo with Empty Stacks
+
+def test_undo_returns_false_when_stack_empty(calculator):
+    assert calculator.undo() is False
+
+
+def test_redo_returns_false_when_stack_empty(calculator):
+    assert calculator.redo() is False

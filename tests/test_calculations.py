@@ -101,12 +101,48 @@ def test_format_result():
     assert calc.format_result(precision=10) == "0.3333333333"
 
 
+def test_format_result_falls_back_when_quantize_overflows_context():
+    # 1e30 has too many digits to quantize to 10 decimal places under the
+    # default Decimal context precision, which trips InvalidOperation.
+    calc = Calculation(operation="Multiplication", operand1=Decimal("1e15"), operand2=Decimal("1e15"))
+    assert calc.format_result(10) == str(calc.result)
+
+
+def test_zero_root_via_calculate():
+    with pytest.raises(OperationError, match="Zero root is undefined"):
+        Calculation(operation="Root", operand1=Decimal("9"), operand2=Decimal("0"))
+
+
 def test_equality():
     calc1 = Calculation(operation="Addition", operand1=Decimal("2"), operand2=Decimal("3"))
     calc2 = Calculation(operation="Addition", operand1=Decimal("2"), operand2=Decimal("3"))
     calc3 = Calculation(operation="Subtraction", operand1=Decimal("5"), operand2=Decimal("3"))
     assert calc1 == calc2
     assert calc1 != calc3
+
+
+def test_str_representation():
+    calc = Calculation(operation="Addition", operand1=Decimal("2"), operand2=Decimal("3"))
+    assert str(calc) == "Addition(2, 3) = 5"
+
+
+def test_repr_representation():
+    calc = Calculation(operation="Addition", operand1=Decimal("2"), operand2=Decimal("3"))
+    assert repr(calc) == (
+        "Calculation(operation='Addition', operand1=2, operand2=3, "
+        f"result=5, timestamp='{calc.timestamp.isoformat()}')"
+    )
+
+
+def test_equality_with_non_calculation_returns_false():
+    calc = Calculation(operation="Addition", operand1=Decimal("2"), operand2=Decimal("3"))
+    assert (calc == "not a calculation") is False
+    assert calc != "not a calculation"
+
+
+def test_calculate_wraps_arithmetic_overflow_as_operation_error():
+    with pytest.raises(OperationError, match="Calculation failed"):
+        Calculation(operation="Power", operand1=Decimal("10"), operand2=Decimal("400"))
 
 
 # New Test to Cover Logging Warning
